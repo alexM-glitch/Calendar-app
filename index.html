@@ -460,7 +460,6 @@
                     e.preventDefault();
                     
                     const settings = {
-                        orsApiKey: document.getElementById('ors-api-key').value,
                         homeAddress: document.getElementById('home-address').value,
                         workStart: document.getElementById('work-start').value,
                         workEnd: document.getElementById('work-end').value,
@@ -476,7 +475,6 @@
             
             // Load settings into the form
              const currentSettings = autoScheduler.settings;
-             document.getElementById('ors-api-key').value = currentSettings.orsApiKey || '';
              document.getElementById('home-address').value = currentSettings.homeAddress || '';
              document.getElementById('work-start').value = String(currentSettings.workingHours.start).padStart(2, '0') + ':00';
              document.getElementById('work-end').value = String(currentSettings.workingHours.end).padStart(2, '0') + ':00';
