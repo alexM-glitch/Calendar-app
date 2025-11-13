@@ -55,7 +55,7 @@ class Calendar {
       workDays: [1, 2, 3, 4, 5],
       defaultTaskDuration: 60,
       minBreakBetweenTasks: 15,
-      orsApiKey: null, // New
+      orsApiKey: 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImI0YWRkZjNiYmZkNTQyYWE5YzgyOWQyOTM0MzVmNzkwIiwiaCI6Im11cm11cjY0In0=',
       homeAddress: null, // New
     };
     
@@ -146,7 +146,7 @@ class Calendar {
   // --- Settings Management ---
   
   saveSettings(settings) {
-    this.settings.orsApiKey = settings.orsApiKey;
+
     this.settings.homeAddress = settings.homeAddress;
     this.settings.workingHours.start = parseInt(settings.workStart.split(':')[0]);
     this.settings.workingHours.end = parseInt(settings.workEnd.split(':')[0]);
@@ -237,25 +237,10 @@ class Calendar {
       location: task.location,
       isScheduled: false,
       scheduledStart: null,
-      scheduledEnd: null,
-      commuteToDuration: 0,
-      commuteFromDuration: 0
+      scheduledEnd: null
     };
     
-    // Calculate commute times if location is provided
-    if (newTask.location && this.settings.homeAddress && this.settings.orsApiKey) {
-        try {
-            console.log(`Calculating commutes for task: ${newTask.name}`);
-            newTask.commuteToDuration = await this.getCommuteTime(this.settings.homeAddress, newTask.location);
-            newTask.commuteFromDuration = await this.getCommuteTime(newTask.location, this.settings.homeAddress);
-            console.log(`Commutes: To ${newTask.commuteToDuration}m, From ${newTask.commuteFromDuration}m`);
-        } catch (error) {
-            showMessage(`Error calculating commute for task: ${error.message}`, 'error');
-        }
-    }
-    
     this.tasks.push(newTask);
-    // this.saveData(); // <-- No longer needed here, will be called by autoScheduleTasks
     console.log(`Task added: ${newTask.name}`);
     return newTask;
   }
@@ -277,40 +262,6 @@ class Calendar {
     this.events.push(newEvent);
     console.log(`Event added: ${newEvent.name}`);
     
-    // Add commute events if location is provided
-    if (newEvent.location && this.settings.homeAddress && this.settings.orsApiKey) {
-        try {
-            console.log(`Calculating commutes for event: ${newEvent.name}`);
-            const commuteToDuration = await this.getCommuteTime(this.settings.homeAddress, newEvent.location);
-            const commuteFromDuration = await this.getCommuteTime(newEvent.location, this.settings.homeAddress);
-            
-            if (commuteToDuration > 0) {
-                this.events.push({
-                    id: this.generateId(),
-                    name: `Commute to ${newEvent.name}`,
-                    start: new Date(newEvent.start.getTime() - commuteToDuration * 60000),
-                    end: newEvent.start,
-                    isFixed: true,
-                    isCommute: true
-                });
-            }
-            
-            if (commuteFromDuration > 0) {
-                 this.events.push({
-                    id: this.generateId(),
-                    name: `Commute from ${newEvent.name}`,
-                    start: newEvent.end,
-                    end: new Date(newEvent.end.getTime() + commuteFromDuration * 60000),
-                    isFixed: true,
-                    isCommute: true
-                });
-            }
-        } catch (error) {
-            showMessage(`Error calculating commute for event: ${error.message}`, 'error');
-        }
-    }
-    
-    // this.saveData(); // <-- No longer needed here, will be called by autoScheduleTasks
     return newEvent;
   }
 
@@ -319,14 +270,76 @@ class Calendar {
   /**
    * Automatically schedule all unscheduled tasks
    */
-  autoScheduleTasks() {
+  async autoScheduleTasks() {
     // Reset all tasks and remove old task/commute events from the main list
     this.tasks.forEach(task => {
         task.isScheduled = false;
         task.scheduledStart = null;
         task.scheduledEnd = null;
     });
-    this.events = this.events.filter(event => event.isFixed); // Keep only fixed events
+    // WIPE all non-fixed events. We will re-calculate all commutes and scheduled tasks.
+    this.events = this.events.filter(event => event.isFixed && !event.isCommute);
+
+    // --- NEW: Pro-actively calculate commutes for all fixed events for the next 2 weeks ---
+    const now = new Date();
+    const twoWeeksFromNow = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+    // Get only the fixed, non-commute events within our planning window
+    const fixedEvents = this.events
+        .filter(e => e.isFixed && !e.isCommute && e.start < twoWeeksFromNow && e.end > now)
+        .sort((a, b) => a.start - b.start);
+
+    // Group fixed events by day
+    const eventsByDay = fixedEvents.reduce((acc, event) => {
+        const day = event.start.toDateString();
+        if (!acc[day]) {
+            acc[day] = [];
+        }
+        acc[day].push(event);
+        return acc;
+    }, {});
+
+    for (const day in eventsByDay) {
+        const dailyEvents = eventsByDay[day];
+        if (dailyEvents.length > 0 && this.settings.homeAddress && this.settings.orsApiKey) {
+            let lastLocation = this.settings.homeAddress;
+
+            for (const event of dailyEvents) {
+                if (event.location) {
+                    // Commute from last known location to this event
+                    const commuteToDuration = await this.getCommuteTime(lastLocation, event.location);
+                    if (commuteToDuration > 0) {
+                        this.events.push({
+                            id: this.generateId(),
+                            name: `Commute to ${event.name}`,
+                            start: new Date(event.start.getTime() - commuteToDuration * 60000),
+                            end: new Date(event.start.getTime()),
+                            isFixed: true,
+                            isCommute: true
+                        });
+                    }
+                    lastLocation = event.location; // This event's location is the next starting point
+                }
+            }
+
+            // Add a final commute from the last event of the day back home
+            const lastEvent = dailyEvents[dailyEvents.length - 1];
+            if (lastEvent.location) {
+                const commuteHomeDuration = await this.getCommuteTime(lastEvent.location, this.settings.homeAddress);
+                if (commuteHomeDuration > 0) {
+                    this.events.push({
+                        id: this.generateId(),
+                        name: `Commute from ${lastEvent.name}`,
+                        start: new Date(lastEvent.end.getTime()),
+                        end: new Date(lastEvent.end.getTime() + commuteHomeDuration * 60000),
+                        isFixed: true,
+                        isCommute: true
+                    });
+                }
+            }
+        }
+    }
+    // --- END of new commute logic for fixed events ---
 
     // Sort tasks by priority (highest first) and deadline (earliest first)
     const taskQueue = [...this.tasks].sort((a, b) => {
@@ -334,16 +347,40 @@ class Calendar {
         return a.deadline - b.deadline;
     });
 
-    const now = new Date();
-    const twoWeeksFromNow = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+    // We already have 'now' and 'twoWeeksFromNow'
     const availableSlots = this.getAvailableSlots(now, twoWeeksFromNow);
 
     // Schedule each task
-    taskQueue.forEach(task => {
-        const totalDuration = task.duration + task.commuteToDuration + task.commuteFromDuration;
+    for (const task of taskQueue) { // Use for...of to allow await inside
         
         for (let i = 0; i < availableSlots.length; i++) {
             const slot = availableSlots[i];
+
+            // --- NEW: DYNAMIC COMMUTE CALCULATION ---
+            let commuteToDuration = 0;
+            let commuteFromDuration = 0;
+
+            if (task.location && this.settings.homeAddress && this.settings.orsApiKey) {
+                try {
+                    // Find the last event before this slot on the same day to determine starting location
+                    const eventsBeforeSlot = this.events
+                        .filter(e => e.end <= slot.start && e.end.toDateString() === slot.start.toDateString())
+                        .sort((a, b) => b.end - a.end); // Sort descending by end time
+
+                    const lastEvent = eventsBeforeSlot[0];
+                    const startLocation = lastEvent && lastEvent.location ? lastEvent.location : this.settings.homeAddress;
+
+                    commuteToDuration = await this.getCommuteTime(startLocation, task.location);
+                    // Commute from the task is always back to home for this model
+                    commuteFromDuration = await this.getCommuteTime(task.location, this.settings.homeAddress);
+
+                } catch (error) {
+                     showMessage(`Error calculating commute for task ${task.name}: ${error.message}`, 'error');
+                }
+            }
+            // --- END DYNAMIC COMMUTE CALCULATION ---
+
+            const totalDuration = task.duration + commuteToDuration + commuteFromDuration;
             const slotDuration = (slot.end - slot.start) / 60000; // in minutes
 
             // Find a suitable slot
@@ -352,14 +389,15 @@ class Calendar {
                 let currentTime = new Date(slot.start.getTime());
                 
                 // 1. Add "Commute To" event
-                if (task.commuteToDuration > 0) {
-                    const commuteEnd = new Date(currentTime.getTime() + task.commuteToDuration * 60000);
+                if (commuteToDuration > 0) {
+                    const commuteEnd = new Date(currentTime.getTime() + commuteToDuration * 60000);
                     this.events.push({
                         id: this.generateId(),
                         name: `Commute to ${task.name}`,
                         start: currentTime,
                         end: commuteEnd,
-                        isFixed: false, isTask: false, isCommute: true
+                        isFixed: false, isTask: false, isCommute: true,
+                        location: task.location // Add location for chaining
                     });
                     currentTime = commuteEnd; // Advance time
                 }
@@ -369,26 +407,29 @@ class Calendar {
                 task.scheduledEnd = new Date(task.scheduledStart.getTime() + task.duration * 60000);
                 task.isScheduled = true;
                 
-                this.events.push({
+                const taskEvent = {
                     id: task.id,
                     name: task.name,
                     start: task.scheduledStart,
                     end: task.scheduledEnd,
                     isFixed: false, isTask: true, isCommute: false,
-                    taskId: task.id
-                });
+                    taskId: task.id,
+                    location: task.location // Add location for chaining
+                };
+                this.events.push(taskEvent);
                 
                 currentTime = task.scheduledEnd; // Advance time
                 
                 // 3. Add "Commute From" event
-                if (task.commuteFromDuration > 0) {
-                    const commuteEnd = new Date(currentTime.getTime() + task.commuteFromDuration * 60000);
+                if (commuteFromDuration > 0) {
+                    const commuteEnd = new Date(currentTime.getTime() + commuteFromDuration * 60000);
                      this.events.push({
                         id: this.generateId(),
                         name: `Commute from ${task.name}`,
                         start: currentTime,
                         end: commuteEnd,
-                        isFixed: false, isTask: false, isCommute: true
+                        isFixed: false, isTask: false, isCommute: true,
+                        location: this.settings.homeAddress // End location is home
                     });
                     currentTime = commuteEnd; // Advance time
                 }
@@ -403,10 +444,11 @@ class Calendar {
         if (!task.isScheduled) {
             console.warn(`Could not schedule task: ${task.name}`);
         }
-    });
+    }
 
-    this.saveData(); // <-- ADDED: Save all changes after scheduling
+    this.saveData(); // Save all changes after scheduling
     console.log(`Scheduled ${this.tasks.filter(t => t.isScheduled).length} out of ${this.tasks.length} tasks`);
+    this.renderCalendar(); // Re-render the calendar with the new schedule
   }
 
   /**
