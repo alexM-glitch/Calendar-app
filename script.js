@@ -55,7 +55,7 @@ class Calendar {
       workDays: [1, 2, 3, 4, 5],
       defaultTaskDuration: 60,
       minBreakBetweenTasks: 15,
-      orsApiKey: null, // New
+      orsApiKey: 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImI0YWRkZjNiYmZkNTQyYWE5YzgyOWQyOTM0MzVmNzkwIiwiaCI6Im11cm11cjY0In0=',
       homeAddress: null, // New
     };
     
@@ -146,7 +146,7 @@ class Calendar {
   // --- Settings Management ---
   
   saveSettings(settings) {
-    this.settings.orsApiKey = settings.orsApiKey;
+
     this.settings.homeAddress = settings.homeAddress;
     this.settings.workingHours.start = parseInt(settings.workStart.split(':')[0]);
     this.settings.workingHours.end = parseInt(settings.workEnd.split(':')[0]);
@@ -352,26 +352,35 @@ class Calendar {
 
     // Schedule each task
     for (const task of taskQueue) { // Use for...of to allow await inside
-        // We need to find the previous event to calculate commute from.
-        // This is complex, so for now, we continue the simplifying assumption
-        // that tasks start from home. A more advanced implementation would
-        // find the last event in the calendar before the slot starts.
-        let commuteToDuration = 0;
-        let commuteFromDuration = 0;
-
-        if (task.location && this.settings.homeAddress && this.settings.orsApiKey) {
-            try {
-                commuteToDuration = await this.getCommuteTime(this.settings.homeAddress, task.location);
-                commuteFromDuration = await this.getCommuteTime(task.location, this.settings.homeAddress);
-            } catch (error) {
-                 showMessage(`Error calculating commute for task ${task.name}: ${error.message}`, 'error');
-            }
-        }
-
-        const totalDuration = task.duration + commuteToDuration + commuteFromDuration;
         
         for (let i = 0; i < availableSlots.length; i++) {
             const slot = availableSlots[i];
+
+            // --- NEW: DYNAMIC COMMUTE CALCULATION ---
+            let commuteToDuration = 0;
+            let commuteFromDuration = 0;
+
+            if (task.location && this.settings.homeAddress && this.settings.orsApiKey) {
+                try {
+                    // Find the last event before this slot on the same day to determine starting location
+                    const eventsBeforeSlot = this.events
+                        .filter(e => e.end <= slot.start && e.end.toDateString() === slot.start.toDateString())
+                        .sort((a, b) => b.end - a.end); // Sort descending by end time
+
+                    const lastEvent = eventsBeforeSlot[0];
+                    const startLocation = lastEvent && lastEvent.location ? lastEvent.location : this.settings.homeAddress;
+
+                    commuteToDuration = await this.getCommuteTime(startLocation, task.location);
+                    // Commute from the task is always back to home for this model
+                    commuteFromDuration = await this.getCommuteTime(task.location, this.settings.homeAddress);
+
+                } catch (error) {
+                     showMessage(`Error calculating commute for task ${task.name}: ${error.message}`, 'error');
+                }
+            }
+            // --- END DYNAMIC COMMUTE CALCULATION ---
+
+            const totalDuration = task.duration + commuteToDuration + commuteFromDuration;
             const slotDuration = (slot.end - slot.start) / 60000; // in minutes
 
             // Find a suitable slot
@@ -387,7 +396,8 @@ class Calendar {
                         name: `Commute to ${task.name}`,
                         start: currentTime,
                         end: commuteEnd,
-                        isFixed: false, isTask: false, isCommute: true
+                        isFixed: false, isTask: false, isCommute: true,
+                        location: task.location // Add location for chaining
                     });
                     currentTime = commuteEnd; // Advance time
                 }
@@ -397,14 +407,16 @@ class Calendar {
                 task.scheduledEnd = new Date(task.scheduledStart.getTime() + task.duration * 60000);
                 task.isScheduled = true;
                 
-                this.events.push({
+                const taskEvent = {
                     id: task.id,
                     name: task.name,
                     start: task.scheduledStart,
                     end: task.scheduledEnd,
                     isFixed: false, isTask: true, isCommute: false,
-                    taskId: task.id
-                });
+                    taskId: task.id,
+                    location: task.location // Add location for chaining
+                };
+                this.events.push(taskEvent);
                 
                 currentTime = task.scheduledEnd; // Advance time
                 
@@ -416,7 +428,8 @@ class Calendar {
                         name: `Commute from ${task.name}`,
                         start: currentTime,
                         end: commuteEnd,
-                        isFixed: false, isTask: false, isCommute: true
+                        isFixed: false, isTask: false, isCommute: true,
+                        location: this.settings.homeAddress // End location is home
                     });
                     currentTime = commuteEnd; // Advance time
                 }
