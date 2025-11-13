@@ -237,25 +237,10 @@ class Calendar {
       location: task.location,
       isScheduled: false,
       scheduledStart: null,
-      scheduledEnd: null,
-      commuteToDuration: 0,
-      commuteFromDuration: 0
+      scheduledEnd: null
     };
     
-    // Calculate commute times if location is provided
-    if (newTask.location && this.settings.homeAddress && this.settings.orsApiKey) {
-        try {
-            console.log(`Calculating commutes for task: ${newTask.name}`);
-            newTask.commuteToDuration = await this.getCommuteTime(this.settings.homeAddress, newTask.location);
-            newTask.commuteFromDuration = await this.getCommuteTime(newTask.location, this.settings.homeAddress);
-            console.log(`Commutes: To ${newTask.commuteToDuration}m, From ${newTask.commuteFromDuration}m`);
-        } catch (error) {
-            showMessage(`Error calculating commute for task: ${error.message}`, 'error');
-        }
-    }
-    
     this.tasks.push(newTask);
-    // this.saveData(); // <-- No longer needed here, will be called by autoScheduleTasks
     console.log(`Task added: ${newTask.name}`);
     return newTask;
   }
@@ -277,40 +262,6 @@ class Calendar {
     this.events.push(newEvent);
     console.log(`Event added: ${newEvent.name}`);
     
-    // Add commute events if location is provided
-    if (newEvent.location && this.settings.homeAddress && this.settings.orsApiKey) {
-        try {
-            console.log(`Calculating commutes for event: ${newEvent.name}`);
-            const commuteToDuration = await this.getCommuteTime(this.settings.homeAddress, newEvent.location);
-            const commuteFromDuration = await this.getCommuteTime(newEvent.location, this.settings.homeAddress);
-            
-            if (commuteToDuration > 0) {
-                this.events.push({
-                    id: this.generateId(),
-                    name: `Commute to ${newEvent.name}`,
-                    start: new Date(newEvent.start.getTime() - commuteToDuration * 60000),
-                    end: newEvent.start,
-                    isFixed: true,
-                    isCommute: true
-                });
-            }
-            
-            if (commuteFromDuration > 0) {
-                 this.events.push({
-                    id: this.generateId(),
-                    name: `Commute from ${newEvent.name}`,
-                    start: newEvent.end,
-                    end: new Date(newEvent.end.getTime() + commuteFromDuration * 60000),
-                    isFixed: true,
-                    isCommute: true
-                });
-            }
-        } catch (error) {
-            showMessage(`Error calculating commute for event: ${error.message}`, 'error');
-        }
-    }
-    
-    // this.saveData(); // <-- No longer needed here, will be called by autoScheduleTasks
     return newEvent;
   }
 
@@ -334,44 +285,57 @@ class Calendar {
     const twoWeeksFromNow = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
 
     // Get only the fixed, non-commute events within our planning window
-    const dailyFixedEvents = this.events
+    const fixedEvents = this.events
         .filter(e => e.isFixed && !e.isCommute && e.start < twoWeeksFromNow && e.end > now)
         .sort((a, b) => a.start - b.start);
 
-    if (dailyFixedEvents.length > 0 && this.settings.homeAddress && this.settings.orsApiKey) {
-        let lastLocation = this.settings.homeAddress;
+    // Group fixed events by day
+    const eventsByDay = fixedEvents.reduce((acc, event) => {
+        const day = event.start.toDateString();
+        if (!acc[day]) {
+            acc[day] = [];
+        }
+        acc[day].push(event);
+        return acc;
+    }, {});
 
-        for (const event of dailyFixedEvents) {
-            if (event.location) {
-                // Commute from last known location to this event
-                const commuteToDuration = await this.getCommuteTime(lastLocation, event.location);
-                if (commuteToDuration > 0) {
+    for (const day in eventsByDay) {
+        const dailyEvents = eventsByDay[day];
+        if (dailyEvents.length > 0 && this.settings.homeAddress && this.settings.orsApiKey) {
+            let lastLocation = this.settings.homeAddress;
+
+            for (const event of dailyEvents) {
+                if (event.location) {
+                    // Commute from last known location to this event
+                    const commuteToDuration = await this.getCommuteTime(lastLocation, event.location);
+                    if (commuteToDuration > 0) {
+                        this.events.push({
+                            id: this.generateId(),
+                            name: `Commute to ${event.name}`,
+                            start: new Date(event.start.getTime() - commuteToDuration * 60000),
+                            end: new Date(event.start.getTime()),
+                            isFixed: true,
+                            isCommute: true
+                        });
+                    }
+                    lastLocation = event.location; // This event's location is the next starting point
+                }
+            }
+
+            // Add a final commute from the last event of the day back home
+            const lastEvent = dailyEvents[dailyEvents.length - 1];
+            if (lastEvent.location) {
+                const commuteHomeDuration = await this.getCommuteTime(lastEvent.location, this.settings.homeAddress);
+                if (commuteHomeDuration > 0) {
                     this.events.push({
                         id: this.generateId(),
-                        name: `Commute to ${event.name}`,
-                        start: new Date(event.start.getTime() - commuteToDuration * 60000),
-                        end: new Date(event.start.getTime()),
+                        name: `Commute from ${lastEvent.name}`,
+                        start: new Date(lastEvent.end.getTime()),
+                        end: new Date(lastEvent.end.getTime() + commuteHomeDuration * 60000),
                         isFixed: true,
                         isCommute: true
                     });
                 }
-                lastLocation = event.location; // This event's location is the next starting point
-            }
-        }
-
-        // Add a final commute from the last event of the day back home
-        const lastEvent = dailyFixedEvents[dailyFixedEvents.length - 1];
-        if (lastEvent.location) {
-            const commuteHomeDuration = await this.getCommuteTime(lastEvent.location, this.settings.homeAddress);
-            if (commuteHomeDuration > 0) {
-                this.events.push({
-                    id: this.generateId(),
-                    name: `Commute from ${lastEvent.name}`,
-                    start: new Date(lastEvent.end.getTime()),
-                    end: new Date(lastEvent.end.getTime() + commuteHomeDuration * 60000),
-                    isFixed: true,
-                    isCommute: true
-                });
             }
         }
     }
